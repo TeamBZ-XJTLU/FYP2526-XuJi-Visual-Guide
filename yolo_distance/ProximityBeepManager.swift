@@ -15,18 +15,18 @@ final class ProximityBeepManager {
     // Audio
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    private var outputFormat: AVAudioFormat!            // 跟随硬件输出（采样率/声道）
-    private var baseBeep: AVAudioPCMBuffer?             // 基础滴声（匹配 outputFormat）
+    private var outputFormat: AVAudioFormat!
+    private var baseBeep: AVAudioPCMBuffer?
 
     // Scheduling
     private var timer: Timer?
     private var isActive = false
-    private var currentInterval: TimeInterval = 0.8     // 由 update(distance:) 更新
-    var enableNearHighPitch = true                      // 近距离使用更高音调
+    private var currentInterval: TimeInterval = 0.8
+    var enableNearHighPitch = true                     
 
     private init() {
         setupEngine()
-        // 基础 beep 缓冲与 outputFormat 绑定
+
         baseBeep = buildSineBuffer(sampleRate: outputFormat.sampleRate,
                                    channels: outputFormat.channelCount,
                                    duration: 0.08,
@@ -36,7 +36,7 @@ final class ProximityBeepManager {
 
     // MARK: - Public API
 
-    /// 开始提示音（若已在播则忽略）。不会抢占/修改 AVAudioSession。
+    /// 开始提示音
     func start() {
         guard !isActive else { return }
         isActive = true
@@ -44,7 +44,7 @@ final class ProximityBeepManager {
         scheduleNext()
     }
 
-    /// 停止提示音并静音（不停止引擎，避免频繁启停）。
+    /// 停止提示音并静音。
     func stop() {
         isActive = false
         timer?.invalidate()
@@ -52,13 +52,13 @@ final class ProximityBeepManager {
         player.stop()
     }
 
-    /// 更新距离（米）。未锁定目标时请调用 stop() 完全静音。
+    /// 更新距离
     func update(distance meters: Float?) {
         guard isActive else { return }
         if let m = meters {
             currentInterval = ProximityBeepManager.interval(for: m)
         }
-        // 若为 nil，不改 interval；完全静音由上层 stop() 处理
+      
     }
 
     // MARK: - Engine
@@ -95,10 +95,10 @@ final class ProximityBeepManager {
         if next < minI { next = minI }
         if next > maxI { next = maxI }
 
-        // 近距离阈值（用于高音）
+        // 近距离阈值
         let isNear: Bool = (next <= 0.28)
 
-        // 重置 timer，再按“单次+递归”策略安排下一次
+
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: next, repeats: false) { [weak self] _ in
             guard let self else { return }

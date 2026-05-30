@@ -3,13 +3,17 @@ import ARKit
 import Vision
 import CoreML
 import simd
+import AVFoundation
 
 // MARK: - SwiftUI wrapper of ARSCNView
 struct ARCameraDetectView: UIViewRepresentable {
     var targetClass: String = ""
+    var enableSceneNarration: Bool = false
     func makeCoordinator() -> Coordinator {
-        Coordinator(targetClass: targetClass)  
+        Coordinator(targetClass: targetClass,
+                   )
     }
+
 
     func makeUIView(context: Context) -> ARSCNView {
         let arView = ARSCNView()
@@ -42,6 +46,8 @@ struct ARCameraDetectView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
         context.coordinator.targetClass = targetClass
+        context.coordinator.sceneNarrationEnabled = enableSceneNarration
+        
     }
 
     // MARK: - Coordinator
@@ -50,9 +56,25 @@ struct ARCameraDetectView: UIViewRepresentable {
 
         var targetClass: String
 
+        var sceneNarrationEnabled: Bool = false {
+                didSet {
+                    if sceneNarrationEnabled {
+                        // 开启时重置内部状态，下一帧可以正常播报
+                        sceneNarrator.reset()
+                    } else {
+                        // 关闭时立刻打断当前播报
+                        sceneNarrator.stopIfNeeded()
+                    }
+                }
+            }
+
+            // 环境描述管理器
+        private let sceneNarrator = SceneNarrationManager()
+
         init(targetClass: String) {
-            self.targetClass = targetClass
-        }
+                self.targetClass = targetClass
+            }
+      
 
         private let drawEveryNFrames = 2
         private let medianWindow = 7
@@ -70,6 +92,10 @@ struct ARCameraDetectView: UIViewRepresentable {
         private let drawPlaneOutline = true
 
         private let beeper = ProximityBeepManager.shared
+        
+        private var firstObjectLocation: simd_float3? = nil  // 用于保存首次识别物体的位置
+
+
 
         weak var arView: ARSCNView?
         let overlay = CALayer()
@@ -79,6 +105,7 @@ struct ARCameraDetectView: UIViewRepresentable {
         private var inflight = false
         private var frameCount = 0
         private var planeMap: [UUID: ARPlaneAnchor] = [:]
+        
 
         struct Detection {
             let rect: CGRect
@@ -112,12 +139,16 @@ struct ARCameraDetectView: UIViewRepresentable {
         }
 
         // MARK: - AR Session Updates
+        // MARK: - AR Session Updates
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            frameCount += 1
+            guard let arView = arView else { inflight = false; return }
             if inflight || frameCount % drawEveryNFrames != 0 { return }
             inflight = true
 
-            let io = currentInterfaceOrientation(of: arView!)
+            // 清空之前的物体位置信息，每次识物时重置
+            firstObjectLocation = nil
+
+            let io = currentInterfaceOrientation(of: arView)
             let cgOri = cgImageOrientation(for: io)
             let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: cgOri)
 
@@ -131,10 +162,7 @@ struct ARCameraDetectView: UIViewRepresentable {
                 }
                 self.inflight = false
             }
-
-
         }
-
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             for a in anchors {
                 if let p = a as? ARPlaneAnchor { planeMap[p.identifier] = p }
@@ -155,14 +183,14 @@ struct ARCameraDetectView: UIViewRepresentable {
         private func handleDetections(req: VNRequest) {
             guard let arView, let frame = arView.session.currentFrame else { inflight = false; return }
             guard let results = req.results else { inflight = false; return }
-
+            
             let objs = results.compactMap { $0 as? VNRecognizedObjectObservation }
             let viewSize = arView.bounds.size
             let depthPB = frame.sceneDepth?.depthMap
             let confPB  = frame.sceneDepth?.confidenceMap
-
+            
             var dets: [Detection] = []
-
+            
             for ob in objs {
                 let bbox = ob.boundingBox
                 let label = ob.labels.first?.identifier ?? "object"
@@ -170,7 +198,7 @@ struct ARCameraDetectView: UIViewRepresentable {
                 let rectPx = vnRectToPixel(bbox: bbox, in: viewSize)
                 let centerPx = CGPoint(x: rectPx.midX, y: rectPx.midY)
                 let supportPx = CGPoint(x: rectPx.midX, y: rectPx.maxY - 2)
-
+                
                 var worldMedianCenter: simd_float3? = nil
                 var worldSupport: simd_float3? = nil
                 if let depthPB {
@@ -189,27 +217,27 @@ struct ARCameraDetectView: UIViewRepresentable {
                         worldSupport = res.world
                     }
                 }
-
+                
                 var planeMark: String? = nil
                 if let ws = worldSupport { planeMark = markHorizontalPlane(pointWorld: ws) }
                 if planeMark == nil { planeMark = markPlaneViaRaycast(screenPt: supportPx) }
-
+                
                 var planeHorizDist: Float? = nil
                 var camDist: Float? = nil
                 var planeEdgePx: (CGPoint, CGPoint)? = nil
                 var planeOutlinePx: [CGPoint]? = nil
                 var edgeWorld: (simd_float3, simd_float3)? = nil
                 var selectedAnchor: ARPlaneAnchor? = nil
-
+                
                 if let wc = worldMedianCenter {
                     let camT = frame.camera.transform
                     let camWorld = simd_float3(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
                     camDist = simd_length(wc - camWorld)
                 }
-
-             
-
-
+                
+                
+                
+                
                 if let ws = worldSupport,
                    let anchor = pickHorizontalAnchorForSupport(worldSupport: ws, supportPx: supportPx) {
                     selectedAnchor = anchor
@@ -221,11 +249,11 @@ struct ARCameraDetectView: UIViewRepresentable {
                 if let edgeW = edgeWorld {
                     let camT = frame.camera.transform
                     let camWorld = simd_float3(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
-
+                    
                     let a = simd_float2(edgeW.0.x, edgeW.0.z)
                     let b = simd_float2(edgeW.1.x, edgeW.1.z)
                     let cam2D = simd_float2(camWorld.x, camWorld.z)
-
+                    
                     let dist = pointToSegmentDistance2D(cam2D, a, b)
                     planeHorizDist = dist
                 }
@@ -244,11 +272,18 @@ struct ARCameraDetectView: UIViewRepresentable {
                                       supportToEdgeDistM: nil,
                                       planeAnchor: selectedAnchor))
             }
-
+            
             DispatchQueue.main.async {
                 self.drawOverlay(dets: dets, viewSize: viewSize)
                 self.inflight = false
+
+                if self.sceneNarrationEnabled {
+                    self.sceneNarrator.updateScene(with: dets)
+                }
+                // 关闭时的 stop 已经在 didSet 里做了，这里不再管
             }
+
+            
             // —— 选出与 targetClass 匹配的目标最近距离（相机距离）
             var nearestTargetDist: Float? = nil
             if !targetClass.isEmpty {
@@ -257,27 +292,274 @@ struct ARCameraDetectView: UIViewRepresentable {
                     nearestTargetDist = best
                 }
             }
-
             // 根据是否识别到目标来控制 Beep
             if let dist = nearestTargetDist {
-                // 首次激活
                 beeper.start()
                 beeper.update(distance: dist)
             } else {
                 beeper.stop()
             }
-
         }
+        // MARK: - 环境描述管理器：不打断、说完后播最新变化
+        final class SceneNarrationManager: NSObject, AVSpeechSynthesizerDelegate {
+
+            private let tts = AVSpeechSynthesizer()
+
+            /// 两次播报的最小间隔（秒）
+            private let cooldown: TimeInterval = 1.0
+
+            /// 变化的最小类别数，达到才触发播报
+            private let minChangedCategoriesToSpeak = 3
+
+            /// 上一次真正“播报成功”的快照
+            private var lastSnapshot: [String: Int] = [:]
+            private var hasBaseline: Bool = false
+
+            /// 正在播报期间，最新帧快照会写到这里
+            private var pendingSnapshot: [String: Int]? = nil
+
+            /// 是否正在播报一句话
+            private var isSpeaking: Bool = false
+
+            private var lastUtterTime: Date = .distantPast
+
+            override init() {
+                super.init()
+                tts.delegate = self
+            }
+
+            // MARK: - Public API
+
+            /// 环境描述开启时调用
+            func reset() {
+                lastSnapshot = [:]
+                pendingSnapshot = nil
+                hasBaseline = false
+                isSpeaking = false
+                lastUtterTime = .distantPast
+
+                if tts.isSpeaking {
+                    tts.stopSpeaking(at: .immediate)
+                }
+            }
+
+            /// 环境描述关闭时调用
+            func stopIfNeeded() {
+                if tts.isSpeaking {
+                    tts.stopSpeaking(at: .immediate)
+                }
+                isSpeaking = false
+                pendingSnapshot = nil
+            }
+
+            // MARK: - 主入口：每帧调用
+            func updateScene(with dets: [ARCameraDetectView.Coordinator.Detection]) {
+                let snapshot = buildSnapshot(from: dets)
+                guard !snapshot.isEmpty else { return }
+                    
+                let now = Date()
+
+                // 1. 第一次 → 直接播报完整环境描述
+                if !hasBaseline {
+                    if now.timeIntervalSince(lastUtterTime) < cooldown { return }
+
+                    let sentence = buildInitialSentence(from: snapshot)
+                    guard !sentence.isEmpty else { return }
+
+                    speak(sentence)
+                    lastSnapshot = snapshot
+                    hasBaseline = true
+                    lastUtterTime = now
+                    return
+                }
+
+                // 2. 正在说话 → 不播报，只更新“最新状态”
+                if isSpeaking || tts.isSpeaking {
+                    pendingSnapshot = snapshot  // 不断覆盖，保证永远是最新帧
+                    return
+                }
+
+                // 3. 不在说话 → 比较与 lastSnapshot 是否有变化
+                let (adds, rems) = diffSnapshot(old: lastSnapshot, new: snapshot)
+                let changedCount = adds.count + rems.count
+
+                if changedCount < minChangedCategoriesToSpeak {
+                    return
+                }
+
+                if now.timeIntervalSince(lastUtterTime) < cooldown {
+                    return
+                }
+
+                let diffSentence = buildDiffSentence(additions: adds, removals: rems)
+                guard !diffSentence.isEmpty else { return }
+
+                speak(diffSentence)
+                lastSnapshot = snapshot
+                lastUtterTime = now
+            }
+
+            // MARK: - Snapshot 构建
+
+            private func buildSnapshot(from dets: [ARCameraDetectView.Coordinator.Detection]) -> [String: Int] {
+                var snap: [String: Int] = [:]
+                for d in dets {
+                    let label = d.label.lowercased()
+                    snap[label, default: 0] += 1
+                }
+                return snap
+            }
+
+            // MARK: - Snapshot diff
+
+            private func diffSnapshot(old: [String: Int],
+                                      new: [String: Int])
+            -> (additions: [String: Int], removals: [String: Int]) {
+
+                var additions: [String: Int] = [:]
+                var removals:  [String: Int] = [:]
+
+                let allKeys = Set(old.keys).union(new.keys)
+
+                for k in allKeys {
+                    let o = old[k] ?? 0
+                    let n = new[k] ?? 0
+                    if n > o { additions[k] = n - o }
+                    if n < o { removals[k] = o - n }
+                }
+
+                return (additions, removals)
+            }
+
+            // MARK: - 句子生成
+
+            private func buildInitialSentence(from snapshot: [String: Int]) -> String {
+                let sorted = snapshot.sorted { $0.key < $1.key }
+                var parts: [String] = []
+
+                for (label, count) in sorted {
+                    let piece = count == 1 ? "1 \(label)" : "\(count) \(label)s"
+                    parts.append(piece)
+                }
+
+                guard !parts.isEmpty else { return "" }
+
+                if parts.count == 1 { return "I see \(parts[0])." }
+                if parts.count == 2 { return "I see \(parts[0]) and \(parts[1])." }
+
+                let head = parts.dropLast().joined(separator: ", ")
+                let tail = parts.last!
+                return "I see \(head), and \(tail)."
+            }
+
+            private func buildDiffSentence(additions: [String: Int],
+                                           removals: [String: Int]) -> String {
+
+                var segments: [String] = []
+
+                let addSorted = additions.sorted { $0.key < $1.key }
+                let remSorted = removals.sorted { $0.key < $1.key }
+
+                if !addSorted.isEmpty {
+                    let list = buildItemList(addSorted)
+                    segments.append("\(list) appeared")
+                }
+
+                if !remSorted.isEmpty {
+                    let list = buildItemList(remSorted)
+                    segments.append("\(list) disappeared")
+                }
+
+                guard !segments.isEmpty else { return "" }
+
+                return segments.count == 1
+                    ? segments[0] + "."
+                    : segments[0] + ", and " + segments[1] + "."
+            }
+
+            private func buildItemList(_ items: [(key: String, value: Int)]) -> String {
+                var parts: [String] = []
+                for (label, count) in items {
+                    let piece = count == 1 ? "a \(label)" : "\(count) \(label)s"
+                    parts.append(piece)
+                }
+
+                if parts.count == 1 { return parts[0] }
+                if parts.count == 2 { return parts[0] + " and " + parts[1] }
+
+                let head = parts.dropLast().joined(separator: ", ")
+                let tail = parts.last!
+                return "\(head), and \(tail)"
+            }
+
+            // MARK: - TTS 处理
+
+            private func speak(_ text: String) {
+                guard !text.isEmpty else { return }
+
+                let session = AVAudioSession.sharedInstance()
+                do {
+                    try session.setCategory(.playback,
+                                            mode: .spokenAudio,
+                                            options: [.duckOthers])
+                    try session.setActive(true)
+                } catch { print("[TTS] AudioSession error: \(error)") }
+
+                let utt = AVSpeechUtterance(string: text)
+                utt.voice = AVSpeechSynthesisVoice(language: "en-US")
+                utt.rate = AVSpeechUtteranceDefaultSpeechRate
+
+                isSpeaking = true
+                tts.speak(utt)
+                print("[SceneNarration] \(text)")
+            }
+
+            // MARK: - AVSpeechSynthesizerDelegate
+
+            func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                   didFinish utterance: AVSpeechUtterance) {
+                isSpeaking = false
+
+                // 说完一句之后，看 pendingSnapshot 有没有新的场景
+                guard let pending = pendingSnapshot else { return }
+
+                // 清空 pending，避免重复播报
+                pendingSnapshot = nil
+
+                // 重新比对 pending 与 lastSnapshot
+                let (adds, rems) = diffSnapshot(old: lastSnapshot, new: pending)
+
+                let changed = adds.count + rems.count
+                if changed < minChangedCategoriesToSpeak { return }
+
+                let now = Date()
+                if now.timeIntervalSince(lastUtterTime) < cooldown { return }
+
+                let sentence = buildDiffSentence(additions: adds, removals: rems)
+                guard !sentence.isEmpty else { return }
+
+                // 播报 pending → newest snapshot
+                speak(sentence)
+                lastSnapshot = pending
+                lastUtterTime = now
+            }
+
+            func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                   didCancel utterance: AVSpeechUtterance) {
+                isSpeaking = false
+            }
+        }
+
 
         // MARK: - 绘制叠加层
         private func drawOverlay(dets: [Detection], viewSize: CGSize) {
             overlay.frame = CGRect(origin: .zero, size: viewSize)
             overlay.sublayers?.forEach { $0.removeFromSuperlayer() }
 
-            let limitedDets = dets.prefix(2)
+            //let limitedDets = dets.prefix(2)
 
             // 平面轮廓与橙色边
-            for d in limitedDets {
+            for d in dets {
                 if drawPlaneOutline, let poly = d.planeOutlinePx, poly.count >= 3 {
                     let path = UIBezierPath()
                     path.move(to: poly[0])
@@ -303,7 +585,7 @@ struct ARCameraDetectView: UIViewRepresentable {
             }
 
             // 框与标签
-            for d in limitedDets {
+            for d in dets {
                 let isTarget = !targetClass.isEmpty && d.label.lowercased().contains(targetClass.lowercased())
 
                 // 外框
@@ -391,7 +673,7 @@ struct ARCameraDetectView: UIViewRepresentable {
             }
 
             // 距离连线
-            drawAllPairLinks(dets: Array(limitedDets))
+            drawAllPairLinks(dets: Array(dets))
         }
 
 
@@ -858,7 +1140,7 @@ struct ARCameraDetectView: UIViewRepresentable {
             return simd_float3(worldP.x, worldP.y, worldP.z)
         }
 
-        // Raycast 回退（备用，可用于远距容错）
+        // Raycast 回退
         private func fallbackDepthViaRaycast(screenPt: CGPoint,
                                              view: ARSCNView,
                                              frame: ARFrame) -> (world: simd_float3, distance: Float)? {

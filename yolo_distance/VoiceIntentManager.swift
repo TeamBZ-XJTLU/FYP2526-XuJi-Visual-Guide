@@ -37,7 +37,7 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
     private var debounceTimer: Timer?
 
     private let promptText = "What are you looking for?"
-    private var finishedOnce = false   // 保证本轮只完成一次
+    private var finishedOnce = false  
 
     override init() {
         super.init()
@@ -54,7 +54,7 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
                 targetKeyword = ""
                 errorMessage = nil
                 finishedOnce = false
-                speakPrompt()  // 仅这一次会在播报结束后开始监听
+                speakPrompt()
             } catch {
                 let msg = "Permission denied: \(error.localizedDescription)"
                 errorMessage = msg
@@ -100,7 +100,7 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
         ttsPhase = .confirm
         safelySetAudioSession(category: .playback,
                               mode: .spokenAudio,
-                              options: [.duckOthers]) // 不打断滴声，仅轻度压低
+                              options: [.duckOthers])
         if tts.isSpeaking { tts.stopSpeaking(at: .immediate) }
         let phrase = "Looking for \(target)"
         let utt = AVSpeechUtterance(string: phrase)
@@ -115,7 +115,7 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
         ttsPhase = nil
         if phase == .prompt {
             print("[Voice] TTS(prompt) finished → start one-shot listening")
-            startOneShotListening()    // 仅此一次会开启监听
+            startOneShotListening()
         } else {
             print("[Voice] TTS(confirm/none) finished → do nothing")
         }
@@ -230,7 +230,7 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
                 self.recognizedText = text
                 print("[Voice] partial/final → \"\(text)\"  final=\(result.isFinal)")
 
-                // 兜底防抖：说完 0.7s 自动收尾
+
                 self.debounceTimer?.invalidate()
                 self.debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: false) { [weak self] _ in
                     self?.finishOnce(with: text)
@@ -249,19 +249,19 @@ final class VoiceIntentManager: NSObject, ObservableObject, AVSpeechSynthesizerD
         guard !finishedOnce else { return }
         finishedOnce = true
 
-        stopListening() // 立刻停麦，并且本轮不会再次开启
+        stopListening()
 
         let keyword = extractKeyword(from: text)
         self.targetKeyword = keyword
         print("[Voice] targetKeyword = \"\(keyword)\"")
 
-        // 播报确认，不会引发监听
+
         speakLooking(for: keyword)
     }
 
     // MARK: - Text Utils
     private func extractKeyword(from text: String) -> String {
-        // 取最后一个“实词”
+
         let stop = Set(["a","an","the","please","thanks","thank","you"])
         let tokens = text
             .lowercased()
